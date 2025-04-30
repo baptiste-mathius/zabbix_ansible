@@ -1,39 +1,152 @@
 ---
-- name: Déploiement de la base de données Zabbix
-  hosts: zabbix_db_servers
-  become: yes
-  vars:
-    mysql_root_password: "secure_root_password"
-    zabbix_db_name: zabbix
-    zabbix_db_user: zabbix
-    zabbix_db_password: "secure_zabbix_db_password"
-  
-  roles:
-    - role: geerlingguy.mysql
-      tags: mysql
-      mysql_databases:
-        - name: "{{ zabbix_db_name }}"
-          encoding: utf8
-          collation: utf8_bin
-      mysql_users:
-        - name: "{{ zabbix_db_user }}"
-          host: "%"
-          password: "{{ zabbix_db_password }}"
-          priv: "{{ zabbix_db_name }}.*:ALL"
+name: Installer Zabbix 7.0 LTS sur Debian 12 avec MariaDB
+hosts: all
+become: true
 
-- name: Installation de Zabbix Server LTS
-  hosts: zabbix_servers
-  become: yes
-  vars:
-    zabbix_server_version: 7.0
-    zabbix_server_dbtype: mysql
-    zabbix_server_dbhost: "{{ hostvars['zabbix_db_servers'][0]['ansible_host'] }}"
-    zabbix_server_dbname: "{{ zabbix_db_name }}"
-    zabbix_server_dbuser: "{{ zabbix_db_user }}"
-    zabbix_server_dbpassword: "{{ zabbix_db_password }}"
-    zabbix_url: http://{{ ansible_host }}/zabbix
-  
-  roles:
-    - role: community.zabbix.zabbix_server
-      tags: zabbix_server
+vars:
+  zabbix_db_name: zabbix
+  zabbix_db_user: zabbix
+  zabbix_db_password: sio2024
+  zabbix_version: "7.0"
+  zabbix_repo_url: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/debian/pool/main/z/zabbix-release/zabbix-release_{{ zabbix_version }}-1+debian12_all.deb"
 
+tasks:
+  - name: Mettre à jour la liste des paquets
+    ansible.builtin.apt:
+      update_cache: yes
+
+  - name: Installer les dépendances nécessaires
+    ansible.builtin.apt:
+      name: 
+        - wget
+        - gnupg
+        - lsb-release
+      state: present
+
+  - name: Ajouter le dépôt officiel Zabbix
+    ansible.builtin.get_url:
+      url: "{{ zabbix_repo_url }}"
+      dest: /tmp/zabbix-release.deb
+
+  - name: Installer le paquet du dépôt Zabbix
+    ansible.builtin.apt:
+      deb: /tmp/zabbix-release.deb
+
+  - name: Mettre à jour la liste des paquets après ajout du dépôt Zabbix
+    ansible.builtin.apt:
+      update_cache: yes
+
+  - name: Installer MariaDB, Zabbix server, frontend et agent
+    ansible.builtin.apt:
+      name:
+        - mariadb-server
+        - mariadb-client
+        - zabbix-server-mysql
+        - zabbix-frontend-php
+        - zabbix-apache-conf
+        - zabbix-sql-scripts
+        - zabbix-agent
+      state: present
+
+  - name: Démarrer et activer MariaDB
+    ansible.builtin.service:
+      name: mariadb
+      state: started
+      enabled: yes
+
+  - name: Sécuriser MariaDB (désactiver l'utilisateur anonyme, test DB, etc.)
+    ansible.builtin.shell: |
+      mysql -u root <<EOF
+      DELETE FROM mysql.user WHERE User='';
+      DROP DATABASE IF EXISTS test;
+      DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+      FLUSH PRIVILEGES;
+      EOF
+
+  - name: Créer la base de données et l'utilisateur zabbix
+    ansible.builtin.shell: |
+      mysql -u root <<EOF
+      CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+      CREATE USER IF NOT EXISTS '{{ zabbix_db_user }}'@'%' IDENTIFIED BY '{{ zabbix_db_password }}';
+      GRANT ALL PRIVILEGES ON {{ zabbix_db_name }}.* TO '{{ zabbix_db_user }}'@'%';
+      CREATE USER IF NOT EXISTS '{{ zabbix_db_user }}'@'localhost' IDENTIFIED BY '{{ zabbix_db_password }}';
+      GRANT ALL PRIVILEGES ON {{ zabbix_db_name }}.* TO '{{ zabbix_db_user }}'@'localhost';
+      SET GLOBAL log_bin_trust_function_creators = 1;
+      FLUSH PRIVILEGES;
+      EOF
+
+  - name: Importer le schéma initial de la base Zabbix
+    ansible.builtin.shell: |
+      zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql --default-character-set=utf8mb4 -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }}
+    args:
+      creates: /var/lib/mysql/{{ zabbix_db_name }}/acknowledges.frm
+
+  - name: Configurer la connexion à la base de données dans Zabbix Server
+    ansible.builtin.lineinfile:
+      path: /etc/zabbix/zabbix_server.conf
+      regexp: "^#?{{ item.param }}="
+      line: "{{ item.param }}={{ item.value }}"
+      state: present
+    loop:
+      - { param: "DBHost", value: "localhost" }
+      - { param: "DBName", value: "{{ zabbix_db_name }}" }
+      - { param: "DBUser", value: "{{ zabbix_db_user }}" }
+      - { param: "DBPassword", value: "{{ zabbix_db_password }}" }
+
+  - name: Configurer PHP pour Zabbix Frontend
+    ansible.builtin.lineinfile:
+      path: /etc/zabbix/apache.conf
+      regexp: "^\\s*php_value date.timezone .*"
+      line: "        php_value date.timezone Europe/Paris"
+      state: present
+
+  - name: Redémarrer et activer les services Zabbix et Apache
+    ansible.builtin.service:
+      name: "{{ item }}"
+      state: restarted
+      enabled: yes
+    loop:
+      - zabbix-server
+      - zabbix-agent
+      - apache2
+
+  - name: Configurer le timezone dans PHP pour Zabbix Frontend
+    ansible.builtin.lineinfile:
+      path: /etc/php/8.2/apache2/php.ini
+      regexp: "^;?date.timezone ="
+      line: "date.timezone = Europe/Paris"
+      state: present
+
+  - name: S'assurer que PHP est configuré pour le bon timezone
+    ansible.builtin.lineinfile:
+      path: /etc/php/8.2/apache2/php.ini
+      regexp: "^;?date.timezone"
+      line: "date.timezone = Europe/Paris"
+      state: present
+      ignore_errors: yes
+
+  - name: Installer le paquet locales
+    ansible.builtin.apt:
+      name: locales
+      state: present
+
+  - name: Copier la configuration des locales
+    ansible.builtin.copy:
+      dest: /etc/locale.gen
+      content: |
+        fr_FR.UTF-8 UTF-8
+        en_US.UTF-8 UTF-8
+
+  - name: Générer les locales
+    ansible.builtin.command: locale-gen
+
+  - name: S'assurer que la locale par défaut est bien définie
+    ansible.builtin.lineinfile:
+      path: /etc/default/locale
+      regexp: "^LANG="
+      line: 'LANG=fr_FR.UTF-8'
+
+  - name: Redémarrer Apache pour prendre en compte la configuration PHP
+    ansible.builtin.service:
+      name: apache2
+      state: restarted
