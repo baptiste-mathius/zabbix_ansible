@@ -14,3 +14,7 @@
 
 - Login / MDP : Admin / Zabbix
 - Vérifier les agents SNMP sur les machines a monitorer et les installer si besoin. 
+
+## Vlan avec PfSense
+
+- Pour la création des Vlans avec PfSense : https://provya.net/?d=2016/05/18/14/29/10-pfsense-configurer-ses-vlan 
