@@ -17,4 +17,5 @@
 
 ## Vlan avec PfSense
 
-- Pour la création des Vlans avec PfSense : https://provya.net/?d=2016/05/18/14/29/10-pfsense-configurer-ses-vlan 
+- Pour la création des Vlans avec PfSense : https://provya.net/?d=2016/05/18/14/29/10-pfsense-configurer-ses-vlan
+- https://www.it-connect.fr/comment-creer-des-vlans-avec-proxmox-et-pfsense/ 
